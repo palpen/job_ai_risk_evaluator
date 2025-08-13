@@ -1,0 +1,14 @@
+streamlit
+openai
+pypdf2
+python-docx
+spacy
+nltk
+streamlit
+openai
+pypdf2
+spacy
+nltk
+
+
+

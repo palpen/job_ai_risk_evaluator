@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# OS
+.DS_Store
+
+# NLTK/Spacy caches
+nltk_data/
+.cache/
+

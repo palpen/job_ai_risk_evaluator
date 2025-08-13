@@ -14,3 +14,6 @@ __pycache__/
 nltk_data/
 .cache/
 
+# Ignore resume/sample PDFs
+*.pdf
+

@@ -22,10 +22,7 @@ try:
 except Exception:
     PyPDF2 = None  # type: ignore
 
-try:
-    import docx  # python-docx
-except Exception:
-    docx = None  # type: ignore
+docx = None  # python-docx unavailable on this index
 
 
 ALLOWED_CLASSIFICATIONS = {"Low", "Moderate", "High"}
@@ -329,7 +326,8 @@ def parse_resume(file_path: str) -> Optional[Dict[str, Any]]:
     if suffix == ".pdf":
         text = _extract_text_from_pdf(file_path)
     elif suffix == ".docx":
-        text = _extract_text_from_docx(file_path)
+        # DOCX parsing disabled (python-docx not installed). Convert to PDF instead.
+        text = ""
     else:
         try:
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:

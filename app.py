@@ -91,27 +91,118 @@ def extract_raw_text(file_path: str) -> str:
 
 def analyze_resume_with_llm(client: OpenAI, raw_text: str, model: str) -> Dict[str, Any]:
     system_prompt = (
-        "You are an expert career analyst. Parse the resume text and extract key information, "
-        "then assess AI automation risk."
+        "You are an expert career analyst system. Your purpose is to parse raw resume text, "
+        "extract key professional information, and classify the role's automation risk based on a defined framework."
     )
-    user_prompt = f"""Resume Text:
+    user_prompt = f"""--- Analysis Framework & Definitions ---
+
+AI Capability Definition: For this analysis, "AI" refers to current models capable of advanced text/code generation, data analysis, pattern recognition, and process automation. It does not include physical robotics or Artificial General Intelligence (AGI).
+
+Classification Rubric: You must use the following five-level scale for your classification.
+
+Very High: The role's core functions are almost entirely digital, repetitive, and follow predictable patterns that can be fully automated with current AI. (e.g., Data Entry, Transcription, Basic Customer Service Chat).
+
+High: The majority of core tasks are automatable (e.g., content generation, data analysis, report summarization), but the role may include minor tasks requiring human oversight or simple judgment. (e.g., Financial Analyst, Digital Marketer, Copywriter).
+
+Moderate: The role contains a significant mix of automatable tasks and responsibilities that require human-centric skills like strategic planning, complex problem-solving, or nuanced interpersonal communication. (e.g., Product Manager, HR Manager, Graphic Designer).
+
+Low: The majority of core tasks depend on high-stakes human judgment, strategic leadership, client relationship management, or creative work that is not easily replicated. AI can act as a tool but cannot replace the core function. (e.g., Engineering Manager, Lawyer, Senior Sales Executive).
+
+Very Low: The role is fundamentally grounded in physical interaction, high-level strategic direction for an entire organization, or deep emotional intelligence and empathy. (e.g., Surgeon, CEO, Licensed Therapist, Skilled Tradesperson).
+
+--- Few-Shot Examples ---
+
+# Example 1: High Automation Risk
+
+Resume Text:
+
+Alex Chen - Content Specialist
+
+A data-driven content creator with 4 years of experience in the tech industry. Proven ability to grow organic traffic through targeted SEO strategies and compelling blog content.
+
+Experience:
+Content Marketing Specialist, DataCorp (2021-Present)
+- Write and publish 4-5 SEO-optimized blog posts per week using Clearscope and SurferSEO.
+- Manage the corporate social media calendar across Twitter and LinkedIn, scheduling posts with Buffer.
+- Analyze content performance using Google Analytics and create monthly traffic reports.
+- Increased organic blog traffic by 150% in 18 months.
+
+Education:
+B.A. in Communications, State University
+
+Output:
+
+{{
+  "job_title": "Content Marketing Specialist",
+  "skills": ["Content Creation", "SEO", "Google Analytics", "Social Media Management", "Buffer", "Clearscope", "Data Analysis", "Reporting"],
+  "recent_experience": [
+    "Writes and publishes 4-5 SEO-optimized blog posts weekly.",
+    "Manages social media calendar and post scheduling.",
+    "Analyzes content performance and creates monthly reports using Google Analytics."
+  ],
+  "classification": "High",
+  "rationale": "The core responsibilities, such as writing SEO-optimized content, managing social media schedules, and generating performance reports, are all tasks that can be significantly automated by current AI content generation and analytics tools."
+}}
+
+# Example 2: Low Automation Risk
+
+Resume Text:
+
+Samantha Rivera
+
+Senior Engineering Manager with over 12 years of experience leading cross-functional software development teams in agile environments. Expert in strategic planning, talent development, and stakeholder management for large-scale SaaS products.
+
+Experience:
+Senior Engineering Manager, Innovate Inc. (2018-Present)
+- Lead a team of 15 software engineers responsible for the flagship SaaS platform.
+- Collaborate with product and design leadership to define the long-term technical roadmap and strategy.
+- Conduct performance reviews, mentor junior engineers, and manage hiring and team growth.
+- Mediate technical disagreements and align engineering teams on architectural decisions.
+- Successfully delivered three major product releases ahead of schedule.
+
+Lead Software Engineer, Tech Solutions LLC (2014-2018)
+
+Output:
+
+{{
+  "job_title": "Senior Engineering Manager",
+  "skills": ["Team Leadership", "Strategic Planning", "Talent Development", "Mentoring", "Hiring", "Stakeholder Management", "Agile Methodologies", "SaaS", "Software Development"],
+  "recent_experience": [
+    "Leads a team of 15 software engineers.",
+    "Defines long-term technical roadmap and strategy in collaboration with product and design.",
+    "Manages team performance, mentorship, and hiring.",
+    "Mediates technical disagreements and aligns teams on architectural decisions."
+  ],
+  "classification": "Low",
+  "rationale": "The role's primary functions revolve around strategic leadership, team management, mentorship, and complex stakeholder negotiation. These tasks require a high degree of human judgment and interpersonal skill that cannot be automated by current AI."
+}}
+
+--- Your Task ---
+
+Now, process the following resume text. Perform the following steps:
+
+Extract Information:
+
+job_title: Extract the most relevant and recent job title.
+
+skills: Extract up to 20 key skills as a list of short phrases.
+
+recent_experience: Summarize the most recent experience into 3-8 impactful bullet points.
+
+Classify and Justify:
+
+classification: Assign an automation likelihood classification using the rubric provided.
+
+rationale: Write a 2-4 sentence explanation for your classification.
+
+Your output must be a single, compact JSON object, following the exact structure of the examples.
+
+Resume Text:
+
 {raw_text}
 
-Tasks:
-1) Extract a concise job_title for the candidate (best current/most recent fit).
-2) Extract up to 20 key skills as a list of short phrases.
-3) Summarize recent experience as 3-8 bullet points highlighting impactful responsibilities.
-4) Provide a classification of AI automation likelihood using ONLY one of: Very Low, Low, Moderate, High, Very High.
-5) Provide a brief rationale (2-4 sentences) referencing recent responsibilities or tools.
-
-Output strictly as compact JSON with the following keys:
-{{
-  "job_title": "<string>",
-  "skills": ["..."],
-  "recent_experience": ["..."],
-  "classification": "Very Low|Low|Moderate|High|Very High",
-  "rationale": "<short explanation>"
-}}
+Output:
+Your response MUST be a single, compact JSON object and nothing else.
 """
 
     response = client.chat.completions.create(

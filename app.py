@@ -27,7 +27,7 @@ docx = None  # python-docx unavailable on this index
 
 ALLOWED_CLASSIFICATIONS = {"Low", "Moderate", "High"}
 MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-TEMPERATURE = 0.0
+TEMPERATURE = 1.0
 
 
 def save_uploaded_file_to_temp(uploaded_file) -> str:

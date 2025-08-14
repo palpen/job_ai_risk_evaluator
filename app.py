@@ -30,6 +30,24 @@ MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 TEMPERATURE = 1.0
 
 
+def _hydrate_env_from_streamlit_secrets() -> None:
+    """Load required secrets into environment when running on Streamlit Cloud.
+
+    This lets existing getenv-based code paths continue to work without refactor.
+    """
+    try:
+        # Only set if not already present in the environment
+        if "OPENAI_API_KEY" in st.secrets and not os.getenv("OPENAI_API_KEY"):
+            os.environ["OPENAI_API_KEY"] = str(st.secrets["OPENAI_API_KEY"]).strip()
+        if "OPENAI_MODEL" in st.secrets and not os.getenv("OPENAI_MODEL"):
+            os.environ["OPENAI_MODEL"] = str(st.secrets["OPENAI_MODEL"]).strip()
+    except Exception:
+        # st.secrets may not be available locally without a secrets.toml
+        pass
+
+
+_hydrate_env_from_streamlit_secrets()
+
 def save_uploaded_file_to_temp(uploaded_file) -> str:
     file_suffix = Path(uploaded_file.name).suffix.lower() or ""
     with tempfile.NamedTemporaryFile(delete=False, suffix=file_suffix) as tmp_file:

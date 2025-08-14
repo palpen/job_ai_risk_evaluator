@@ -575,7 +575,7 @@ def main() -> None:
         )
         return
 
-    with st.spinner("Evaluating role with AI…"):
+    with st.spinner("Evaluating likelihood of your job being automated by AI…"):
         try:
             enriched = build_recency_weighted_summary({
                 "designation": job_title or "",
@@ -603,7 +603,7 @@ def main() -> None:
             return
 
     st.subheader("AI Evaluation")
-    st.markdown(f"**Classification:** {classification}")
+    st.markdown(f"**How likely is your job to be automated by AI?** {classification}")
     if rationale:
         st.markdown("**Explanation:**")
         st.write(rationale)

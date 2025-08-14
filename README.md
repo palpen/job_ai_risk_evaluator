@@ -2,6 +2,9 @@
 
 Is your job at risk of being replaced by an AI? Upload your resume to find out.
 
+The resume data is sent to an OpenAI LLM model to do the analysis. No data is stored or shared with anyone else.
+
+![Demo](./demo.gif)
 
 ## Requirements
 - Python 3.9+

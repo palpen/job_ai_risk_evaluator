@@ -1,4 +1,4 @@
-"""AI Job Automation Risk Evaluator
+"""AI Job Automation Risk Evaluator.
 
 A Streamlit web application that analyzes uploaded resumes to classify the likelihood
 that a job role could be automated by current AI technology. Uses OpenAI's language

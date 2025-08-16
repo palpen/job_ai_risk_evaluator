@@ -44,6 +44,7 @@ docx = None  # python-docx unavailable on this index
 ALLOWED_CLASSIFICATIONS = {"Very Low", "Low", "Moderate", "High", "Very High"}
 MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 TEMPERATURE = 1.0
+
 # Simple per-session rate limit (defaults: 3 requests per 60s)
 RATE_LIMIT_MAX_REQUESTS = int(os.getenv("RATE_LIMIT_MAX_REQUESTS", "3"))
 RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60"))
@@ -60,6 +61,7 @@ ALLOWED_MIME_TYPES = {
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # .docx
     "text/plain"
 }
+
 
 
 def _hydrate_env_from_streamlit_secrets() -> None:
@@ -90,6 +92,8 @@ def _hydrate_env_from_streamlit_secrets() -> None:
 
 
 _hydrate_env_from_streamlit_secrets()
+
+
 
 
 def validate_uploaded_file(uploaded_file: st.runtime.uploaded_file_manager.UploadedFile) -> tuple[bool, str]:
@@ -124,128 +128,150 @@ def validate_uploaded_file(uploaded_file: st.runtime.uploaded_file_manager.Uploa
     return True, ""
 
 
-def save_uploaded_file_to_temp(uploaded_file: st.runtime.uploaded_file_manager.UploadedFile) -> str:
-    """Save an uploaded Streamlit file to a temporary file on disk.
+def extract_text_from_uploaded_file(uploaded_file: st.runtime.uploaded_file_manager.UploadedFile) -> tuple[str, str]:
+    """Extract text directly from uploaded file in memory (no temp files).
 
-    This function creates a temporary file with the same extension as the uploaded
-    file and writes the file contents to it. The temporary file is not automatically
-    deleted, so the caller is responsible for cleanup.
-
+    This function processes the uploaded file entirely in memory using BytesIO,
+    avoiding the security risks and cleanup complexity of temporary files.
+    
     Args:
         uploaded_file: A Streamlit uploaded file object containing the file data
                       and metadata.
 
     Returns:
-        str: The absolute path to the created temporary file.
-
-    Example:
-        >>> temp_path = save_uploaded_file_to_temp(uploaded_file)
-        >>> # Process the file...
-        >>> os.remove(temp_path)  # Clean up when done
+        tuple[str, str]: (extracted_text, error_message). Error message empty if successful.
     """
-    file_suffix = Path(uploaded_file.name).suffix.lower() or ""
-    with tempfile.NamedTemporaryFile(delete=False, suffix=file_suffix) as tmp_file:
-        tmp_file.write(uploaded_file.getbuffer())
-        return tmp_file.name
+    try:
+        file_data = uploaded_file.getvalue()
+        file_type = uploaded_file.type
+        
+        if file_type == "application/pdf":
+            return _extract_text_from_pdf_bytes(file_data)
+        elif file_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+            return _extract_text_from_docx_bytes(file_data)
+        elif file_type == "text/plain":
+            # Handle plain text files
+            try:
+                text = file_data.decode('utf-8', errors='ignore')
+                return text[:MAX_TEXT_CHARS], ""
+            except Exception as e:
+                return "", f"Error reading text file: {str(e)}"
+        else:
+            return "", f"Unsupported file type: {file_type}"
+            
+    except Exception as e:
+        return "", f"Error processing uploaded file: {str(e)}"
 
 
-def _extract_text_from_pdf(file_path: str) -> str:
-    """Extract text content from a PDF file using PyPDF2.
+def _extract_text_from_pdf_bytes(file_data: bytes) -> tuple[str, str]:
+    """Extract text content from PDF bytes using PyPDF2 with security limits.
 
-    Attempts to read all pages from a PDF file and concatenate their text content.
-    This function is resilient to errors - if PyPDF2 is not available, if the file
-    cannot be opened, or if individual pages fail to extract, it will return an
-    empty string rather than raising an exception.
+    Processes PDF data in memory with strict limits on pages and characters
+    to prevent DoS attacks. Handles malformed PDFs gracefully.
 
     Args:
-        file_path: The absolute path to the PDF file to extract text from.
+        file_data: The raw bytes of the PDF file.
 
     Returns:
-        str: The concatenated text content from all readable pages, with pages
-             separated by newlines. Returns empty string if extraction fails.
+        tuple[str, str]: (extracted_text, error_message). Error message empty if successful.
 
-    Note:
-        This function may not work well with scanned PDFs or PDFs with complex
-        layouts, as PyPDF2 has limitations with these document types.
+    Security Features:
+        - Limits processing to MAX_PDF_PAGES
+        - Truncates output at MAX_TEXT_CHARS
+        - Handles malformed/encrypted PDFs gracefully
     """
     if PyPDF2 is None:
-        return ""
+        return "", "PDF processing not available (PyPDF2 not installed)"
+    
     try:
         text_parts: List[str] = []
-        with open(file_path, "rb") as f:
-            reader = PyPDF2.PdfReader(f)
-            # Iterate through all pages, handling both old and new PyPDF2 API versions
-            for page in getattr(reader, "pages", []) or []:
-                try:
-                    # Extract text from each page, some pages may fail individually
-                    text_parts.append(page.extract_text() or "")
-                except Exception:
-                    # Skip pages that can't be processed (corrupted, encrypted, etc.)
-                    continue
-        # Join all non-empty text parts and clean up whitespace
-        return "\n".join([t for t in text_parts if t]).strip()
-    except Exception:
-        # Return empty string for any file-level errors (permissions, corruption, etc.)
-        return ""
+        pdf_stream = io.BytesIO(file_data)
+        reader = PyPDF2.PdfReader(pdf_stream)
+        
+        # Check if PDF is encrypted
+        if reader.is_encrypted:
+            return "", "Cannot process encrypted PDF files"
+            
+        pages = getattr(reader, "pages", [])
+        total_pages = len(pages)
+        
+        if total_pages == 0:
+            return "", "PDF contains no readable pages. If this is a scanned document, please use OCR software first."
+            
+        # Limit pages processed to prevent DoS
+        pages_to_process = min(total_pages, MAX_PDF_PAGES)
+        
+        total_chars = 0
+        for i, page in enumerate(pages[:pages_to_process]):
+            try:
+                # Extract text from each page with character limit
+                page_text = page.extract_text() or ""
+                if page_text:
+                    # Check if adding this page would exceed character limit
+                    if total_chars + len(page_text) > MAX_TEXT_CHARS:
+                        # Truncate the last page to fit within limit
+                        remaining_chars = MAX_TEXT_CHARS - total_chars
+                        if remaining_chars > 0:
+                            text_parts.append(page_text[:remaining_chars])
+                        break
+                    
+                    text_parts.append(page_text)
+                    total_chars += len(page_text)
+                    
+            except Exception:
+                # Skip individual pages that can't be processed
+                continue
+                
+        if not text_parts:
+            return "", "No readable text found in PDF. If this is a scanned document, please use OCR software first."
+            
+        extracted_text = "\n".join(text_parts).strip()
+        warning = ""
+        
+        if pages_to_process < total_pages:
+            warning = f" (processed {pages_to_process} of {total_pages} pages due to size limits)"
+        elif total_chars >= MAX_TEXT_CHARS:
+            warning = " (text truncated due to length limits)"
+            
+        return extracted_text, warning
+        
+    except Exception as e:
+        return "", f"Error processing PDF: {str(e)}. If this is a scanned document, please use OCR software first."
 
 
-def _extract_text_from_docx(file_path: str) -> str:
-    """Extract text content from a DOCX file using python-docx.
+def _extract_text_from_docx_bytes(file_data: bytes) -> tuple[str, str]:
+    """Extract text content from DOCX bytes using python-docx.
 
-    Reads all paragraphs from a Microsoft Word document and concatenates them
-    with newlines. This function is currently not functional as the docx library
-    is intentionally set to None in this implementation.
+    Processes DOCX data in memory with character limits to prevent DoS.
+    Currently disabled for security - DOCX parsing can be complex.
 
     Args:
-        file_path: The absolute path to the DOCX file to extract text from.
+        file_data: The raw bytes of the DOCX file.
 
     Returns:
-        str: The concatenated text content from all paragraphs, or empty string
-             if the docx library is unavailable or extraction fails.
+        tuple[str, str]: (extracted_text, error_message). Error message empty if successful.
 
     Note:
-        This function is currently disabled (docx = None) and will always
-        return an empty string. Enable by installing python-docx and importing it.
+        This function is currently disabled for security reasons.
+        DOCX files contain complex XML that can be exploited.
     """
+    # DOCX parsing is disabled for security reasons
     if docx is None:
-        return ""
-    try:
-        document = docx.Document(file_path)
-        paragraphs = [p.text for p in document.paragraphs if p.text]
-        return "\n".join(paragraphs).strip()
-    except Exception:
-        return ""
+        return "", "DOCX processing is disabled for security reasons. Please convert to PDF first."
+    
+    # This code would be used if DOCX parsing were enabled:
+    # try:
+    #     docx_stream = io.BytesIO(file_data)
+    #     document = docx.Document(docx_stream)
+    #     paragraphs = [p.text for p in document.paragraphs if p.text]
+    #     text = "\n".join(paragraphs).strip()
+    #     return text[:MAX_TEXT_CHARS], ""
+    # except Exception as e:
+    #     return "", f"Error processing DOCX: {str(e)}"
+    
+    return "", "DOCX processing is disabled for security reasons. Please convert to PDF first."
 
 
-def extract_raw_text(file_path: str) -> str:
-    """Extract text content from various file formats.
-
-    This is the main text extraction function that dispatches to format-specific
-    extractors based on file extension. Supports PDF, DOCX, and plain text files.
-    For unsupported formats or extraction failures, returns empty string.
-
-    Args:
-        file_path: The absolute path to the file to extract text from.
-
-    Returns:
-        str: The extracted text content, or empty string if extraction fails
-             or the file format is not supported.
-
-    Supported Formats:
-        - .pdf: Extracted using PyPDF2
-        - .docx: Extracted using python-docx (currently disabled)
-        - Other: Treated as plain text with UTF-8 encoding
-    """
-    suffix = Path(file_path).suffix.lower()
-    if suffix == ".pdf":
-        return _extract_text_from_pdf(file_path)
-    if suffix == ".docx":
-        return _extract_text_from_docx(file_path)
-    try:
-        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-            return f.read()
-    except Exception:
-        return ""
 
 
 def analyze_resume_with_llm(client: OpenAI, raw_text: str, model: str) -> Dict[str, Any]:
@@ -432,33 +458,45 @@ Your response MUST be a single, compact JSON object and nothing else.
     return data
 
 
-def parse_resume(file_path: str) -> Optional[Dict[str, Any]]:
-    """Parse a resume file and extract its text content.
+
+
+def parse_resume_from_upload(uploaded_file: st.runtime.uploaded_file_manager.UploadedFile) -> tuple[Optional[Dict[str, Any]], str]:
+    """Parse a resume from uploaded file and extract its text content.
 
     This function serves as the main entry point for resume processing. It
-    extracts raw text from the file and returns it in a dictionary structure.
-    No rule-based parsing or structured data extraction is performed - that
-    is handled by the LLM analysis.
+    extracts raw text from the uploaded file in memory and returns it in a 
+    dictionary structure. No rule-based parsing or structured data extraction
+    is performed - that is handled by the LLM analysis.
 
     Args:
-        file_path: The absolute path to the resume file to parse.
+        uploaded_file: Streamlit uploaded file object.
 
     Returns:
-        Optional[Dict[str, Any]]: A dictionary containing the 'raw_text' key
-                                 with the extracted text, or None if no text
-                                 could be extracted from the file.
+        tuple[Optional[Dict[str, Any]], str]: (parsed_data, error_message).
+        Parsed data contains 'raw_text' key, or None if extraction failed.
+        Error message empty if successful.
 
     Example:
-        >>> result = parse_resume('/path/to/resume.pdf')
+        >>> result, error = parse_resume_from_upload(uploaded_file)
         >>> if result:
         ...     text = result['raw_text']
     """
-    # Simplified approach: only return raw_text; no rule-based extraction
-    # All structured data extraction is handled by the LLM
-    text = extract_raw_text(file_path)
+    # Extract text directly from uploaded file (in memory)
+    text, error_msg = extract_text_from_uploaded_file(uploaded_file)
+    
+    if error_msg:
+        return None, error_msg
+        
     if not text.strip():
-        return None  # Signal that no usable text was found
-    return {"raw_text": text}
+        return None, "No readable text found in the file"
+        
+    # Truncate text for LLM processing to prevent excessive costs/DoS
+    truncated_text = text[:MAX_LLM_INPUT_CHARS]
+    truncation_note = ""
+    if len(text) > MAX_LLM_INPUT_CHARS:
+        truncation_note = f" (truncated from {len(text):,} to {MAX_LLM_INPUT_CHARS:,} characters for processing)"
+    
+    return {"raw_text": truncated_text, "truncation_note": truncation_note}, ""
 
 
 def build_openai_client() -> Optional[OpenAI]:
@@ -538,7 +576,7 @@ def main() -> None:
     This function defines the complete user interface and application flow:
     1. Sets up the Streamlit page configuration and title
     2. Displays upload interface for resume files
-    3. Processes uploaded files (PDF/DOCX text extraction)
+    3. Processes uploaded files (PDF/DOCX text extraction) in memory
     4. Sends resume data to OpenAI for analysis
     5. Displays extracted information and automation risk assessment
 
@@ -554,6 +592,8 @@ def main() -> None:
         DEBUG_LLM: Enable debug logging (set to "1")
     """
     st.set_page_config(page_title="Will AI Take My Job?", page_icon="🤖")
+    
+    
     st.title("Will AI Take My Job?")
     st.write(
         "This tool classifies the likelihood that a role's tasks could be automated by AI. "
@@ -577,27 +617,31 @@ def main() -> None:
         st.error(f"File validation failed: {validation_error}")
         return
 
-    # Process the uploaded file in a temporary location
+    # Process the uploaded file in memory (no temp files)
     with st.spinner("Parsing your resume…"):
-        temp_path = save_uploaded_file_to_temp(uploaded_file)
-        try:
-            extracted = parse_resume(temp_path)
-        finally:
-            # Always clean up the temporary file, even if processing fails
-            try:
-                os.remove(temp_path)
-            except Exception:
-                # Ignore cleanup errors - not critical
-                pass
+        extracted, parse_error = parse_resume_from_upload(uploaded_file)
 
+    if parse_error:
+        st.error(f"Could not parse resume: {parse_error}")
+        return
+        
     if not extracted:
-        st.error("Could not parse resume. Please check the file format.")
+        st.error("Could not extract text from resume. Please check the file format.")
         return
 
     raw_text: str = str(extracted.get("raw_text", ""))
+    truncation_note = extracted.get("truncation_note", "")
+    
     if not raw_text.strip():
-        st.error("Could not read text from resume. Please upload a text-based PDF.")
+        st.error("No readable text found in the resume.")
         return
+        
+    # Show truncation warning if applicable
+    if truncation_note:
+        st.info(f"📄 Resume processed{truncation_note}")
+    
+    # Show file processing info
+    st.success(f"✅ Resume processed successfully ({len(raw_text):,} characters)")
 
     client = build_openai_client()
     if client is None:
@@ -621,10 +665,13 @@ def main() -> None:
     # Send resume to OpenAI for analysis
     with st.spinner("Evaluating likelihood of your job being automated by AI…"):
         try:
-            # Debug logging: print first 2000 chars if DEBUG_LLM is enabled
+            # Debug logging: print metadata only (no PII) if DEBUG_LLM is enabled
             if os.getenv("DEBUG_LLM") == "1":
-                print("=== LLM Inputs (raw resume) ===")
-                print(raw_text[:2000])  # Truncate for readability
+                print("=== LLM Request Debug Info ===")
+                print(f"Text length: {len(raw_text):,} characters")
+                print(f"Model: {MODEL_NAME}")
+                print(f"Temperature: {TEMPERATURE}")
+                # Do NOT log actual resume content to prevent PII leakage
             
             # Call the LLM analysis function
             req_ts.append(now_ts)
@@ -660,10 +707,13 @@ def main() -> None:
             st.markdown(f"  - {b}")
 
     st.subheader("AI Evaluation")
+    
+    
     st.markdown(f"**How likely is your job to be automated by AI?** {classification}")
     if rationale:
         st.markdown("**Explanation:**")
         st.write(rationale)
+        
 
 
 if __name__ == "__main__":

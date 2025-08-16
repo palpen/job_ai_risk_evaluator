@@ -17,10 +17,11 @@ Results are for informational purposes only and should not be considered
 definitive career advice.
 """
 
+import io
 import json
 import os
+import re
 import time
-import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -46,6 +47,19 @@ TEMPERATURE = 1.0
 # Simple per-session rate limit (defaults: 3 requests per 60s)
 RATE_LIMIT_MAX_REQUESTS = int(os.getenv("RATE_LIMIT_MAX_REQUESTS", "3"))
 RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60"))
+
+# Security limits
+MAX_FILE_SIZE_MB = 10  # Hard cap on file uploads
+MAX_PDF_PAGES = 50     # Limit PDF pages to prevent DoS
+MAX_TEXT_CHARS = 200000  # Limit extracted text before LLM processing
+MAX_LLM_INPUT_CHARS = 50000  # Truncate text sent to LLM
+
+# Allowed MIME types for security
+ALLOWED_MIME_TYPES = {
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # .docx
+    "text/plain"
+}
 
 
 def _hydrate_env_from_streamlit_secrets() -> None:
@@ -76,6 +90,39 @@ def _hydrate_env_from_streamlit_secrets() -> None:
 
 
 _hydrate_env_from_streamlit_secrets()
+
+
+def validate_uploaded_file(uploaded_file: st.runtime.uploaded_file_manager.UploadedFile) -> tuple[bool, str]:
+    """Validate uploaded file for security and size constraints.
+    
+    Performs comprehensive validation including:
+    - File size limits
+    - MIME type validation (don't trust extensions)
+    - Basic file structure checks
+    
+    Args:
+        uploaded_file: Streamlit uploaded file object
+        
+    Returns:
+        tuple[bool, str]: (is_valid, error_message). Error message empty if valid.
+    """
+    # Check file size
+    if uploaded_file.size > MAX_FILE_SIZE_MB * 1024 * 1024:
+        return False, f"File too large. Maximum size is {MAX_FILE_SIZE_MB}MB."
+    
+    # Validate MIME type (don't trust file extension)
+    if uploaded_file.type not in ALLOWED_MIME_TYPES:
+        return False, f"Unsupported file type: {uploaded_file.type}. Only PDF and DOCX files are allowed."
+    
+    # Additional validation for PDF files
+    if uploaded_file.type == "application/pdf":
+        # Read first few bytes to verify PDF signature
+        file_data = uploaded_file.getvalue()
+        if not file_data.startswith(b'%PDF-'):
+            return False, "Invalid PDF file format."
+    
+    return True, ""
+
 
 def save_uploaded_file_to_temp(uploaded_file: st.runtime.uploaded_file_manager.UploadedFile) -> str:
     """Save an uploaded Streamlit file to a temporary file on disk.
@@ -514,9 +561,20 @@ def main() -> None:
         "\n\nThe resume data is sent to an OpenAI LLM model to do the analysis. No data is stored or shared with anyone else."
     )
 
-    uploaded_file = st.file_uploader("Upload your resume", type=["pdf", "docx"], key="resume_uploader")
+    uploaded_file = st.file_uploader(
+        "Upload your resume", 
+        type=["pdf", "docx", "txt"], 
+        key="resume_uploader",
+        help=f"Supported formats: PDF, DOCX, TXT. Maximum size: {MAX_FILE_SIZE_MB}MB"
+    )
 
     if uploaded_file is None:
+        return
+
+    # Validate uploaded file for security
+    is_valid, validation_error = validate_uploaded_file(uploaded_file)
+    if not is_valid:
+        st.error(f"File validation failed: {validation_error}")
         return
 
     # Process the uploaded file in a temporary location

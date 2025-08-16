@@ -19,6 +19,7 @@ definitive career advice.
 
 import json
 import os
+import time
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
@@ -42,6 +43,9 @@ docx = None  # python-docx unavailable on this index
 ALLOWED_CLASSIFICATIONS = {"Very Low", "Low", "Moderate", "High", "Very High"}
 MODEL_NAME = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 TEMPERATURE = 1.0
+# Simple per-session rate limit (defaults: 3 requests per 60s)
+RATE_LIMIT_MAX_REQUESTS = int(os.getenv("RATE_LIMIT_MAX_REQUESTS", "3"))
+RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60"))
 
 
 def _hydrate_env_from_streamlit_secrets() -> None:
@@ -544,6 +548,18 @@ def main() -> None:
         )
         return
 
+    # Simple per-session rate limiting
+    now_ts = time.time()
+    req_ts: List[float] = st.session_state.get("_req_timestamps", [])
+    # Keep only timestamps within the sliding window
+    req_ts = [t for t in req_ts if now_ts - t < RATE_LIMIT_WINDOW_SECONDS]
+    if len(req_ts) >= RATE_LIMIT_MAX_REQUESTS:
+        oldest = min(req_ts)
+        wait_seconds = int(RATE_LIMIT_WINDOW_SECONDS - (now_ts - oldest)) + 1
+        st.error(f"Rate limit exceeded. Please wait {wait_seconds}s and try again.")
+        st.caption(f"Limit: {RATE_LIMIT_MAX_REQUESTS} request(s) per {RATE_LIMIT_WINDOW_SECONDS}s per session.")
+        return
+
     # Send resume to OpenAI for analysis
     with st.spinner("Evaluating likelihood of your job being automated by AI…"):
         try:
@@ -553,6 +569,8 @@ def main() -> None:
                 print(raw_text[:2000])  # Truncate for readability
             
             # Call the LLM analysis function
+            req_ts.append(now_ts)
+            st.session_state["_req_timestamps"] = req_ts
             parsed = analyze_resume_with_llm(client, raw_text, MODEL_NAME)
             
             # Extract results with safe defaults

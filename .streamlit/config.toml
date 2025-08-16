@@ -1,0 +1,22 @@
+[server]
+# Maximum file upload size (in MB)
+# This should match MAX_FILE_SIZE_MB constant in app.py
+maxUploadSize = 10
+
+# Security settings
+enableCORS = false
+enableXsrfProtection = true
+
+[client]
+# Show error details only in development
+showErrorDetails = false
+
+# Disable collection of usage stats for privacy
+gatherUsageStats = false
+
+[theme]
+# Optional: Set a professional theme
+primaryColor = "#1f77b4"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f0f2f6"
+textColor = "#262730"

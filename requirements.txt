@@ -3,11 +3,6 @@ openai
 pypdf2
 spacy
 nltk
-streamlit
-openai
-pypdf2
-spacy
-nltk
 
 
 

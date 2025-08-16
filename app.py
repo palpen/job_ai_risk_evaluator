@@ -17,11 +17,14 @@ Results are for informational purposes only and should not be considered
 definitive career advice.
 """
 
+import hashlib
 import io
 import json
 import os
 import re
 import time
+from collections import OrderedDict
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -62,6 +65,11 @@ ALLOWED_MIME_TYPES = {
     "text/plain"
 }
 
+# Cache configuration
+CACHE_EXPIRATION_HOURS = 24
+CACHE_MAX_ENTRIES = 100
+CACHE_KEY_PREFIX = "resume_analysis"
+
 
 
 def _hydrate_env_from_streamlit_secrets() -> None:
@@ -94,6 +102,198 @@ def _hydrate_env_from_streamlit_secrets() -> None:
 _hydrate_env_from_streamlit_secrets()
 
 
+@dataclass
+class CacheEntry:
+    """Represents a cached analysis result with metadata."""
+    result: Dict[str, Any]
+    created_at: float
+    access_count: int = 0
+    last_accessed: float = field(default_factory=time.time)
+    
+    def is_expired(self) -> bool:
+        """Check if cache entry has expired based on creation time."""
+        age_hours = (time.time() - self.created_at) / 3600
+        return age_hours > CACHE_EXPIRATION_HOURS
+    
+    def touch(self) -> None:
+        """Update access statistics for LRU tracking."""
+        self.access_count += 1
+        self.last_accessed = time.time()
+
+
+class ResumeAnalysisCache:
+    """
+    LRU cache for resume analysis results with expiration.
+    
+    Uses Streamlit session state for storage with automatic cleanup
+    of expired entries and LRU eviction when size limits are exceeded.
+    """
+    
+    def __init__(self):
+        """Initialize cache using Streamlit session state."""
+        # Initialize cache in session state if not exists
+        if "analysis_cache" not in st.session_state:
+            st.session_state.analysis_cache = OrderedDict()
+        if "cache_stats" not in st.session_state:
+            st.session_state.cache_stats = {
+                "hits": 0,
+                "misses": 0,
+                "evictions": 0,
+                "expired_cleanups": 0
+            }
+    
+    def _cleanup_expired(self) -> None:
+        """Remove expired entries from cache."""
+        cache = st.session_state.analysis_cache
+        expired_keys = [
+            key for key, entry in cache.items() 
+            if entry.is_expired()
+        ]
+        
+        for key in expired_keys:
+            del cache[key]
+            st.session_state.cache_stats["expired_cleanups"] += 1
+    
+    def _enforce_size_limit(self) -> None:
+        """Enforce cache size limit using LRU eviction."""
+        cache = st.session_state.analysis_cache
+        
+        while len(cache) >= CACHE_MAX_ENTRIES:
+            # Remove least recently used (first in OrderedDict)
+            oldest_key = next(iter(cache))
+            del cache[oldest_key]
+            st.session_state.cache_stats["evictions"] += 1
+    
+    def get(self, cache_key: str) -> Optional[Dict[str, Any]]:
+        """
+        Retrieve cached result if available and not expired.
+        
+        Args:
+            cache_key: SHA-256 hash of normalized resume text
+            
+        Returns:
+            Cached analysis result or None if not found/expired
+        """
+        self._cleanup_expired()
+        
+        cache = st.session_state.analysis_cache
+        
+        if cache_key not in cache:
+            st.session_state.cache_stats["misses"] += 1
+            return None
+        
+        entry = cache[cache_key]
+        if entry.is_expired():
+            del cache[cache_key]
+            st.session_state.cache_stats["expired_cleanups"] += 1
+            st.session_state.cache_stats["misses"] += 1
+            return None
+        
+        # Move to end for LRU (most recently used)
+        entry.touch()
+        cache.move_to_end(cache_key)
+        
+        st.session_state.cache_stats["hits"] += 1
+        return entry.result
+    
+    def put(self, cache_key: str, result: Dict[str, Any]) -> None:
+        """
+        Store analysis result in cache.
+        
+        Args:
+            cache_key: SHA-256 hash of normalized resume text
+            result: Analysis result from OpenAI
+        """
+        self._cleanup_expired()
+        self._enforce_size_limit()
+        
+        cache = st.session_state.analysis_cache
+        entry = CacheEntry(
+            result=result.copy(),  # Deep copy to prevent mutations
+            created_at=time.time()
+        )
+        
+        cache[cache_key] = entry
+        # Ensure it's at the end (most recently used)
+        cache.move_to_end(cache_key)
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get cache performance statistics."""
+        stats = st.session_state.cache_stats.copy()
+        cache = st.session_state.analysis_cache
+        
+        total_requests = stats["hits"] + stats["misses"]
+        hit_rate = (stats["hits"] / total_requests * 100) if total_requests > 0 else 0
+        
+        stats.update({
+            "total_requests": total_requests,
+            "hit_rate_percent": round(hit_rate, 1),
+            "current_entries": len(cache),
+            "max_entries": CACHE_MAX_ENTRIES,
+            "expiration_hours": CACHE_EXPIRATION_HOURS
+        })
+        
+        return stats
+    
+    def clear(self) -> None:
+        """Clear all cached entries (useful for testing/debugging)."""
+        st.session_state.analysis_cache.clear()
+        st.session_state.cache_stats = {
+            "hits": 0,
+            "misses": 0,
+            "evictions": 0,
+            "expired_cleanups": 0
+        }
+
+
+def normalize_resume_text(text: str) -> str:
+    """
+    Normalize resume text for consistent cache key generation.
+    
+    Applies standardization to ensure textually equivalent resumes
+    (with minor formatting differences) generate the same cache key.
+    
+    Args:
+        text: Raw extracted resume text
+        
+    Returns:
+        Normalized text suitable for hashing
+    """
+    # Convert to lowercase for case-insensitive matching
+    normalized = text.lower()
+    
+    # Normalize whitespace: collapse multiple spaces, tabs, newlines into single spaces
+    normalized = re.sub(r'\s+', ' ', normalized)
+    
+    # Remove common formatting artifacts that don't affect content
+    normalized = re.sub(r'[^\w\s@.,()-]', '', normalized)  # Keep basic punctuation
+    
+    # Strip leading/trailing whitespace
+    normalized = normalized.strip()
+    
+    return normalized
+
+
+def generate_cache_key(text: str, model: str) -> str:
+    """
+    Generate a SHA-256 based cache key for resume analysis.
+    
+    The key incorporates both the normalized resume text and model name
+    to ensure cache invalidation when switching between different models.
+    
+    Args:
+        text: Normalized resume text
+        model: OpenAI model name (e.g., 'gpt-4o-mini')
+        
+    Returns:
+        Hexadecimal SHA-256 hash suitable as cache key
+    """
+    # Include model in cache key to handle model changes
+    cache_input = f"{CACHE_KEY_PREFIX}:{model}:{text}"
+    
+    # Generate SHA-256 hash
+    hash_object = hashlib.sha256(cache_input.encode('utf-8'))
+    return hash_object.hexdigest()
 
 
 def validate_uploaded_file(uploaded_file: st.runtime.uploaded_file_manager.UploadedFile) -> tuple[bool, str]:
@@ -458,6 +658,43 @@ Your response MUST be a single, compact JSON object and nothing else.
     return data
 
 
+def analyze_resume_with_cache(client: OpenAI, raw_text: str, model: str) -> tuple[Dict[str, Any], bool]:
+    """
+    Analyze resume with caching to avoid duplicate API calls.
+    
+    This function wraps the LLM analysis with intelligent caching:
+    1. Normalizes the input text for consistent hashing
+    2. Checks cache for existing analysis of identical content
+    3. Returns cached result if found, otherwise calls OpenAI API
+    4. Stores new results in cache for future use
+    
+    Args:
+        client: Initialized OpenAI client
+        raw_text: Raw resume text to analyze
+        model: OpenAI model name
+        
+    Returns:
+        tuple[Dict[str, Any], bool]: (analysis_result, was_cached)
+        was_cached indicates if result came from cache (True) or API (False)
+    """
+    cache = ResumeAnalysisCache()
+    
+    # Normalize text and generate cache key
+    normalized_text = normalize_resume_text(raw_text)
+    cache_key = generate_cache_key(normalized_text, model)
+    
+    # Try to get cached result first
+    cached_result = cache.get(cache_key)
+    if cached_result is not None:
+        return cached_result, True
+    
+    # Cache miss - call OpenAI API
+    fresh_result = analyze_resume_with_llm(client, raw_text, model)
+    
+    # Store result in cache for future use
+    cache.put(cache_key, fresh_result)
+    
+    return fresh_result, False
 
 
 def parse_resume_from_upload(uploaded_file: st.runtime.uploaded_file_manager.UploadedFile) -> tuple[Optional[Dict[str, Any]], str]:
@@ -593,6 +830,20 @@ def main() -> None:
     """
     st.set_page_config(page_title="Will AI Take My Job?", page_icon="🤖")
     
+    # Debug sidebar for cache management
+    if os.getenv("DEBUG_LLM") == "1":
+        with st.sidebar:
+            st.header("🔧 Debug Tools")
+            cache = ResumeAnalysisCache()
+            stats = cache.get_stats()
+            
+            st.metric("Cache Entries", f"{stats['current_entries']}/{stats['max_entries']}")
+            st.metric("Hit Rate", f"{stats['hit_rate_percent']}%")
+            
+            if st.button("🗑️ Clear Cache", help="Clear all cached analysis results"):
+                cache.clear()
+                st.success("Cache cleared!")
+                st.rerun()
     
     st.title("Will AI Take My Job?")
     st.write(
@@ -673,10 +924,9 @@ def main() -> None:
                 print(f"Temperature: {TEMPERATURE}")
                 # Do NOT log actual resume content to prevent PII leakage
             
-            # Call the LLM analysis function
-            req_ts.append(now_ts)
-            st.session_state["_req_timestamps"] = req_ts
-            parsed = analyze_resume_with_llm(client, raw_text, MODEL_NAME)
+            # Call the cached LLM analysis function
+            # Only update rate limiting for actual API calls
+            parsed, was_cached = analyze_resume_with_cache(client, raw_text, MODEL_NAME)
             
             # Extract results with safe defaults
             job_title = parsed.get("job_title")
@@ -708,12 +958,42 @@ def main() -> None:
 
     st.subheader("AI Evaluation")
     
+    # Show cache status
+    if was_cached:
+        st.info("💾 **Result retrieved from cache** - No API call needed!")
+    else:
+        st.info("🔄 **Analysis completed** - Result cached for future use")
+        # Update rate limiting only for fresh API calls
+        req_ts.append(now_ts)
+        st.session_state["_req_timestamps"] = req_ts
     
     st.markdown(f"**How likely is your job to be automated by AI?** {classification}")
     if rationale:
         st.markdown("**Explanation:**")
         st.write(rationale)
         
+    # Show detailed cache statistics in debug mode
+    if os.getenv("DEBUG_LLM") == "1":
+        cache = ResumeAnalysisCache()
+        stats = cache.get_stats()
+        
+        with st.expander("🔍 Cache Statistics (Debug Mode)", expanded=False):
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.metric("Cache Hit Rate", f"{stats['hit_rate_percent']}%")
+                st.metric("Total Requests", stats['total_requests'])
+                
+            with col2:
+                st.metric("Cache Hits", stats['hits'])
+                st.metric("Cache Misses", stats['misses'])
+                
+            with col3:
+                st.metric("Current Entries", f"{stats['current_entries']}/{stats['max_entries']}")
+                st.metric("Evictions", stats['evictions'])
+                
+            st.caption(f"Cache expires after {stats['expiration_hours']} hours • "
+                      f"Expired cleanups: {stats['expired_cleanups']}")
 
 
 if __name__ == "__main__":

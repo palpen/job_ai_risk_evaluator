@@ -32,6 +32,8 @@ import streamlit as st
 from openai import OpenAI
 from openai.types.chat import ChatCompletion
 
+from prompts import prompt_manager, PromptVersion
+
 # Note: We intentionally do not use rule-based or third-party resume parsers.
 
 # Fallback parsers - conditional imports to handle missing dependencies gracefully
@@ -69,6 +71,9 @@ ALLOWED_MIME_TYPES = {
 CACHE_EXPIRATION_HOURS = 24
 CACHE_MAX_ENTRIES = 100
 CACHE_KEY_PREFIX = "resume_analysis"
+
+# Prompt configuration
+PROMPT_VERSION = os.getenv("PROMPT_VERSION", PromptVersion.V1_ORIGINAL.value)
 
 
 
@@ -477,10 +482,9 @@ def _extract_text_from_docx_bytes(file_data: bytes) -> tuple[str, str]:
 def analyze_resume_with_llm(client: OpenAI, raw_text: str, model: str) -> Dict[str, Any]:
     """Analyze resume text using OpenAI's language model for automation risk assessment.
 
-    This function sends the resume text to OpenAI's API with a detailed prompt
-    containing classification rubric and few-shot examples. The LLM extracts
-    structured information (job title, skills, experience) and provides an
-    automation risk classification with explanation.
+    This function sends the resume text to OpenAI's API using versioned prompt templates
+    for maintainable and testable prompt engineering. The LLM extracts structured 
+    information and provides automation risk classification.
 
     Args:
         client: An initialized OpenAI client instance.
@@ -500,132 +504,36 @@ def analyze_resume_with_llm(client: OpenAI, raw_text: str, model: str) -> Dict[s
                   Token usage is logged to console if DEBUG_LLM=1.
 
     Note:
-        The prompt includes a comprehensive 5-level classification rubric with
-        detailed examples to ensure consistent and accurate risk assessments.
+        Uses versioned prompt templates from prompts.py for maintainable prompt engineering.
+        Current prompt version can be set via PROMPT_VERSION environment variable.
     """
-    system_prompt = (
-        "You are an expert career analyst system. Your purpose is to parse raw resume text, "
-        "extract key professional information, and classify the role's automation risk based on a defined framework."
-    )
-    user_prompt = f"""--- Analysis Framework & Definitions ---
-
-AI Capability Definition: For this analysis, "AI" refers to current models capable of advanced text/code generation, data analysis, pattern recognition, and process automation. It does not include physical robotics or Artificial General Intelligence (AGI).
-
-Classification Rubric: You must use the following five-level scale for your classification.
-
-Very High: The role's core functions are almost entirely digital, repetitive, and follow predictable patterns that can be fully automated with current AI. (e.g., Data Entry, Transcription, Basic Customer Service Chat).
-
-High: The majority of core tasks are automatable (e.g., content generation, data analysis, report summarization), but the role may include minor tasks requiring human oversight or simple judgment. (e.g., Financial Analyst, Digital Marketer, Copywriter).
-
-Moderate: The role contains a significant mix of automatable tasks and responsibilities that require human-centric skills like strategic planning, complex problem-solving, or nuanced interpersonal communication. (e.g., Product Manager, HR Manager, Graphic Designer).
-
-Low: The majority of core tasks depend on high-stakes human judgment, strategic leadership, client relationship management, or creative work that is not easily replicated. AI can act as a tool but cannot replace the core function. (e.g., Engineering Manager, Lawyer, Senior Sales Executive).
-
-Very Low: The role is fundamentally grounded in physical interaction, high-level strategic direction for an entire organization, or deep emotional intelligence and empathy. (e.g., Surgeon, CEO, Licensed Therapist, Skilled Tradesperson).
-
---- Few-Shot Examples ---
-
-# Example 1: High Automation Risk
-
-Resume Text:
-
-Alex Chen - Content Specialist
-
-A data-driven content creator with 4 years of experience in the tech industry. Proven ability to grow organic traffic through targeted SEO strategies and compelling blog content.
-
-Experience:
-Content Marketing Specialist, DataCorp (2021-Present)
-- Write and publish 4-5 SEO-optimized blog posts per week using Clearscope and SurferSEO.
-- Manage the corporate social media calendar across Twitter and LinkedIn, scheduling posts with Buffer.
-- Analyze content performance using Google Analytics and create monthly traffic reports.
-- Increased organic blog traffic by 150% in 18 months.
-
-Education:
-B.A. in Communications, State University
-
-Output:
-
-{{
-  "job_title": "Content Marketing Specialist",
-  "skills": ["Content Creation", "SEO", "Google Analytics", "Social Media Management", "Buffer", "Clearscope", "Data Analysis", "Reporting"],
-  "recent_experience": [
-    "Writes and publishes 4-5 SEO-optimized blog posts weekly.",
-    "Manages social media calendar and post scheduling.",
-    "Analyzes content performance and creates monthly reports using Google Analytics."
-  ],
-  "classification": "High",
-  "rationale": "The core responsibilities, such as writing SEO-optimized content, managing social media schedules, and generating performance reports, are all tasks that can be significantly automated by current AI content generation and analytics tools."
-}}
-
-# Example 2: Low Automation Risk
-
-Resume Text:
-
-Samantha Rivera
-
-Senior Engineering Manager with over 12 years of experience leading cross-functional software development teams in agile environments. Expert in strategic planning, talent development, and stakeholder management for large-scale SaaS products.
-
-Experience:
-Senior Engineering Manager, Innovate Inc. (2018-Present)
-- Lead a team of 15 software engineers responsible for the flagship SaaS platform.
-- Collaborate with product and design leadership to define the long-term technical roadmap and strategy.
-- Conduct performance reviews, mentor junior engineers, and manage hiring and team growth.
-- Mediate technical disagreements and align engineering teams on architectural decisions.
-- Successfully delivered three major product releases ahead of schedule.
-
-Lead Software Engineer, Tech Solutions LLC (2014-2018)
-
-Output:
-
-{{
-  "job_title": "Senior Engineering Manager",
-  "skills": ["Team Leadership", "Strategic Planning", "Talent Development", "Mentoring", "Hiring", "Stakeholder Management", "Agile Methodologies", "SaaS", "Software Development"],
-  "recent_experience": [
-    "Leads a team of 15 software engineers.",
-    "Defines long-term technical roadmap and strategy in collaboration with product and design.",
-    "Manages team performance, mentorship, and hiring.",
-    "Mediates technical disagreements and aligns teams on architectural decisions."
-  ],
-  "classification": "Low",
-  "rationale": "The role's primary functions revolve around strategic leadership, team management, mentorship, and complex stakeholder negotiation. These tasks require a high degree of human judgment and interpersonal skill that cannot be automated by current AI."
-}}
-
---- Your Task ---
-
-Now, process the following resume text. Perform the following steps:
-
-Extract Information:
-
-job_title: Extract the most relevant and recent job title.
-
-skills: Extract up to 20 key skills as a list of short phrases.
-
-recent_experience: Summarize the most recent experience into 3-8 impactful bullet points.
-
-Classify and Justify:
-
-classification: Assign an automation likelihood classification using the rubric provided.
-
-rationale: Write a 2-4 sentence explanation for your classification.
-
-Your output must be a single, compact JSON object, following the exact structure of the examples.
-
-Resume Text:
-
-{raw_text}
-
-Output:
-Your response MUST be a single, compact JSON object and nothing else.
-"""
-
-    response = client.chat.completions.create(
-        model=model,
-        temperature=TEMPERATURE,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-    )
+    # Get the appropriate prompt template
+    template = prompt_manager.get_template(PROMPT_VERSION)
+    prompts = template.render(raw_text)
+    
+    # Try to use template's temperature, fall back to default if not supported
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            temperature=template.temperature,
+            messages=[
+                {"role": "system", "content": prompts["system"]},
+                {"role": "user", "content": prompts["user"]},
+            ],
+        )
+    except Exception as e:
+        # If temperature not supported, try without it (uses default)
+        if "temperature" in str(e).lower():
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": prompts["system"]},
+                    {"role": "user", "content": prompts["user"]},
+                ],
+            )
+        else:
+            # Re-raise if it's a different error
+            raise
 
     # Token usage logging for cost debugging (only printed to console)
     try:
@@ -921,7 +829,8 @@ def main() -> None:
                 print("=== LLM Request Debug Info ===")
                 print(f"Text length: {len(raw_text):,} characters")
                 print(f"Model: {MODEL_NAME}")
-                print(f"Temperature: {TEMPERATURE}")
+                print(f"Prompt version: {PROMPT_VERSION}")
+                print(f"Temperature: {prompt_manager.get_template(PROMPT_VERSION).temperature}")
                 # Do NOT log actual resume content to prevent PII leakage
             
             # Call the cached LLM analysis function

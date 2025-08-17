@@ -873,14 +873,16 @@ def main() -> None:
         req_ts.append(now_ts)
         st.session_state["_req_timestamps"] = req_ts
     
-    # Show centered classification result
-    st.markdown("### **How likely is your job to be automated by AI?**")
-    left, mid, right = st.columns([1, 2, 1])
-    with mid:
-        st.markdown(f"### **{classification}**")
-    if rationale:
-        st.markdown("#### **Explanation:**")
-        st.write(rationale)
+    # Add button to reveal AI evaluation
+    if st.button("🤖 Reveal AI Risk Assessment", type="primary", use_container_width=True):
+        # Show centered classification result
+        st.markdown("### **How likely is your job to be automated by AI?**")
+        left, mid, right = st.columns([1, 2, 1])
+        with mid:
+            st.markdown(f"### **{classification}**")
+        if rationale:
+            st.markdown("#### **Explanation:**")
+            st.write(rationale)
         
     # Show detailed cache statistics in debug mode
     if os.getenv("DEBUG_LLM") == "1":

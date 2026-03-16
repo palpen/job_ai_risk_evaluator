@@ -4,6 +4,8 @@ Is your job at risk of being replaced by an AI? Upload your resume to find out.
 
 The resume data is sent to an OpenAI LLM model to do the analysis. No data is stored or shared with anyone else.
 
+Try it here --> https://willaitakemyjob.streamlit.app/
+
 ![Demo](./demo.gif)
 
 ## Requirements
